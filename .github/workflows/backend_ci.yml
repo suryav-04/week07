@@ -9,12 +9,12 @@ on:
       - '.github/workflows/backend_ci.yml'
 
 env:
-  # Set in repo Secrets as the full login server, e.g. "suryav07acr.azurecr.io"
+  # Must be set as a repo secret; e.g. "suryav07acr.azurecr.io"
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  # extra traceable tag (optional)
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
 
 jobs:
+  # --- 1) TEST & LINT ---
   test_and_lint_backends:
     runs-on: ubuntu-latest
 
@@ -83,6 +83,7 @@ jobs:
           POSTGRES_PASSWORD: postgres
         run: pytest tests --maxfail=1 --disable-warnings -q
 
+  # --- 2) BUILD & PUSH (only if tests pass) ---
   build_and_push_images:
     runs-on: ubuntu-latest
     needs: test_and_lint_backends
@@ -96,37 +97,45 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # Derive registry NAME from login server (e.g., suryav07acr.azurecr.io -> suryav07acr)
+      # Derive registry NAME from login server (e.g., "suryav07acr.azurecr.io" -> "suryav07acr")
       - name: Derive ACR name
         id: acr
         run: |
           ACR_NAME="$(echo "${{ env.ACR_LOGIN_SERVER }}" | cut -d. -f1)"
           echo "name=$ACR_NAME" >> "$GITHUB_OUTPUT"
 
+      # This performs docker login to the registry
       - name: Login to Azure Container Registry
         run: az acr login --name ${{ steps.acr.outputs.name }}
 
-      - name: Build and Push Product Service Image
+      # Sanity: show the folders so we know the build contexts exist
+      - name: Show repo layout
         run: |
-          set -e
-          docker build \
-            -f backend/product_service/Dockerfile \
-            -t ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ github.sha }} \
-            -t ${{ env.ACR_LOGIN_SERVER }}/product_service:latest \
-            backend/product_service
-          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ github.sha }}
-          docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
+          pwd
+          ls -la
+          ls -la backend || true
+          ls -la backend/product_service || true
+          ls -la backend/order_service || true
 
-      - name: Build and Push Order Service Image
+      # Build & push PRODUCT (single-line build so the context can't be dropped)
+      - name: Build and Push Product Service Image
+        env:
+          IMG_SHA:    ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ github.sha }}
+          IMG_LATEST: ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
         run: |
-          set -e
-          docker build \
-            -f backend/order_service/Dockerfile \
-            -t ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ github.sha }} \
-            -t ${{ env.ACR_LOGIN_SERVER }}/order_service:latest \
-            backend/order_service
-          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ github.sha }}
-          docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
+          docker build -f backend/product_service/Dockerfile -t "$IMG_SHA" -t "$IMG_LATEST" backend/product_service
+          docker push "$IMG_SHA"
+          docker push "$IMG_LATEST"
+
+      # Build & push ORDER
+      - name: Build and Push Order Service Image
+        env:
+          IMG_SHA:    ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ github.sha }}
+          IMG_LATEST: ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
+        run: |
+          docker build -f backend/order_service/Dockerfile -t "$IMG_SHA" -t "$IMG_LATEST" backend/order_service
+          docker push "$IMG_SHA"
+          docker push "$IMG_LATEST"
 
       - name: Logout from Azure
         if: always()
